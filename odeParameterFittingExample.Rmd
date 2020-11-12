@@ -1,0 +1,265 @@
+---
+title: "Parameter Fitting for Models with Differential Equations"
+author: "darthaline"
+date: "28 Sept 2020"
+output:
+  html_notebook:
+    toc: true
+---
+
+Based on [Learning R: Parameter Fitting for Models Involving Differential Equations](https://notesofdabbler.wordpress.com/2013/06/30/learning-r-parameter-fitting-for-models-involving-differential-equations/) by rdabbler.
+
+[Original code and data](https://bitbucket.org/notesofdabbler/blog_notesofdabbler/src/2932ce48caa370abd549531df5fe4a93bfc26c23/04_learnR_parfitODE/?at=master).
+
+## Loading libraries
+
+```{r}
+# load libraries
+library(ggplot2) #plotting
+library(cowplot) #plotting
+library(reshape2) #reshaping data (tall-narrow <-> short-wide)
+library(deSolve) #solving differential equations
+library(minpack.lm) #least squares fit using levenberg-marquart algorithm
+```
+
+## Loading data
+
+```{r digitizedData, eval=FALSE}
+data <- data.frame(Time = numeric(0),
+                   Conc = numeric(0),
+                   Species = character(0),
+                   stringsAsFactors = FALSE)
+
+fileList <- list.files(file.path('data'))
+fileList <- fileList[grep('.csv', fileList)]
+
+for (i in 1:length(fileList)){
+  fileTemp <- read.csv(file.path('data', fileList[i]), header = FALSE)
+  fileTemp$Experiment <- sub('.csv', '', fileList[i])
+  
+  data <- rbind(data, fileTemp,
+                stringsAsFactors = FALSE)
+}
+
+rm(fileTemp, i, fileList)
+
+colnames(data) <- c('time', 'Conc', 'Species')
+
+# averaging times
+time <- data$time
+timeList <- c()
+for (i in 1:(length(time)/3)) {
+  avgVal <- (time[i] + time[i + length(time)/3] + time[i + 2*length(time)/3]) / 3
+  timeList <- c(timeList, avgVal)
+}
+
+data$time <- rep(timeList, 3)
+rm(time, timeList, i, avgVal)
+```
+
+```{r}
+#load concentration data
+df=read.table(file.path('data', "ABC_data.dat"))
+names(df)=c("time","ca","cb","cc")
+dataMelted=melt(df,id.vars=c("time"),variable.name="species",value.name="conc")
+
+```
+
+## Plotting data
+
+```{r}
+plotData <- ggplot(data=dataMelted, aes(x=time, y=conc, color=species))+
+  geom_point(size=3)+
+  theme_half_open() +
+  background_grid()
+plotData
+rm(plotData)
+```
+
+## Equations
+
+$\frac{dc_A}{dt} = -k_1 c_A$
+
+$\frac{dc_B}{dt} = k_1 c_A - k_2 c_B$
+
+$\frac{dc_C}{dt} = k_2 c_B$
+
+with initial concentrations $c_A = 1$, $c_B = 0$, $c_C = 0$.
+
+```{r reactionFunction}
+# rate function
+rxnrate = function(t, c, parms){
+ 
+ # rate constant passed through a list called parms
+ k1 = parms$k1
+ k2 = parms$k2
+ 
+ # c is the concentration of species
+ 
+ # derivatives dc/dt are computed below
+ r = rep(0, length(c))
+ r[1] = -k1*c["A"] #dcA/dt
+ r[2] = k1*c["A"] - k2*c["B"] #dcB/dt
+ r[3] = k2*c["B"] #dcC/dt
+ 
+ # the computed derivatives are returned as a list
+ # order of derivatives needs to be the same as the order of species in c
+ return(list(r))
+ 
+}
+```
+
+We can compute trajectories for a given parameter set, here $k_1 = 2$, $k_2 = 1$.
+
+```{r}
+# predicted concentration for a given parameter set
+cinit = c(A = 1,B = 0, C = 0)
+t = unique(df$time)
+parms = list(k1 = 2, k2 = 1)
+out = ode(y = cinit, times = t, func = rxnrate, parms = parms, method = 'euler')
+head(out)
+
+rm(cinit, t, parms, out)
+```
+## Computing residuals
+
+```{r}
+ssq = function(parms){
+  
+  # inital concentration
+  cinit = c(A = 1,B = 0,C = 0)
+  # time points for which conc is reported
+  # include the points where data is available
+  t=c(seq(0,5,0.1),df$time)
+  t=sort(unique(t))
+  # parameters from the parameter estimation routine
+  k1 = parms[1]
+  k2 = parms[2]
+  # solve ODE for a given set of parameters
+  out = ode(y = cinit, times = t, func = rxnrate, parms = list(k1 = k1,k2 = k2), method = 'euler')
+  
+  # Filter data that contains time points where data is available
+  outdf = data.frame(out)
+  outdf = outdf[outdf$time %in% df$time,]
+  # Evaluate predicted vs experimental residual
+  preddf=melt(outdf,id.var="time",variable.name="species",value.name="conc")
+  expdf=melt(df,id.var="time",variable.name="species",value.name="conc")
+  ssqres=preddf$conc-expdf$conc
+  
+  # return predicted vs experimental residual
+  return(ssqres)
+
+}
+```
+
+```{r}
+# parameter fitting using levenberg marquart algorithm
+# initial guess for parameters
+parms = c(k1 = 0.5, k2 = 0.5)
+# fitting
+fitval = nls.lm(par = parms, fn = ssq)
+
+summary(fitval)
+```
+
+Estimated parameter values:
+
+```{r estimatedParameters}
+parest=as.list(coef(fitval))
+parest
+```
+Number of degrees of freedom (number of datapoints - number of fitted parameters):
+
+```{r degreesOfFreedom}
+dof=nrow(dataMelted)-2
+dof
+```
+
+Mean error:
+
+```{r meanError}
+ms=sqrt(deviance(fitval)/dof)
+ms
+```
+
+Covariance matrix:
+
+```{r covarianceMatrix}
+S=vcov(fitval)
+S
+```
+
+```{r cleanUp}
+rm(fitval, ms)
+```
+
+
+## Plotting predicted vs experimental
+
+```{r}
+# plot of predicted vs experimental data
+ 
+# simulated predicted profile at estimated parameter values
+cinit = c(A = 1, B = 0, C = 0)
+t = seq(0,5, 0.2)
+parms = as.list(parest)
+out = ode(y = cinit, times = t, func = rxnrate, parms = parms)
+outdf = data.frame(out)
+names(outdf)=c("time","ca predicted","cb predicted","cc predicted")
+ 
+# Overlay predicted profile with experimental data
+tmppred=melt(outdf,id.var=c("time"),variable.name="species",value.name="conc")
+
+```
+
+
+```{r}
+library(scales)
+hex_codes1 <- hue_pal()(3)
+
+plotData <- ggplot(data=dataMelted, aes(x=time, y=conc, color=species))+
+  geom_point(size=3)+
+  geom_line(data=tmppred,aes(x=time,y=conc,color=species,linetype=species))+
+  theme_half_open() +
+  background_grid() +
+  scale_color_manual(values=rep(hex_codes1,each=2))
+plotData
+
+rm(cinit, t, parms, out, outdf, tmppred, hex_codes1, plotData)
+```
+
+## Parameter uncertainty estimation
+
+```{r}
+# Get the 95% confidence region
+ 
+# Inverse of covariance matrix
+Sinv = solve(S)
+ 
+# get points for a circle with radius r
+r = sqrt(qf(0.95, 2, dof)*2)
+theta = seq(0, 2*pi, length.out=100)
+z = cbind(r*cos(theta), r*sin(theta))
+# transform points of circle into points of ellipse using
+# svd of inverse covariance matrix
+Sinv_svd = svd(Sinv) # inverse of covariance matrix
+xt = t(Sinv_svd$v) %*% diag(1/sqrt(Sinv_svd$d)) %*% t(z) # transform from circle to ellipse
+x = t(xt)
+# translate the ellipse so that center is the estimated parameter value
+x = x + matrix(rep(as.numeric(parest),100), nrow = 100, byrow = T)
+
+x <- data.frame(x)
+colnames(x) <- c('k1', 'k2')
+plotEllipse <- ggplot(x, aes(k1, k2)) +
+  geom_point()+
+  geom_point(data = data.frame(parest), aes(k1, k2)) +
+  theme_half_open() +
+  background_grid()
+plotEllipse
+
+rm(Sinv, S, r, theta, z, dof, Sinv_svd, xt, x, plotEllipse)
+```
+
+
+
+
